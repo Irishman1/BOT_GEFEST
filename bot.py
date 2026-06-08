@@ -1,4 +1,5 @@
 import logging
+import re
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -34,6 +35,159 @@ CB_FLAT = "fl"          # fl:<id>:<slug>:<page>:<cat>
 CB_BACK_CATEGORIES = "back_cat"
 CB_BACK_COMPLEXES = "back_cx"  # back_cx:<cat>
 CB_SHOW_PHONE = "phone"
+
+# --- Підбір варіанту за параметрами (майстер з питань) ---
+CB_WIZ_START = "wiz_start"
+CB_WIZ_ROOM = "wizr"        # wizr:<room_code>
+CB_WIZ_BUDGET = "wizb"      # wizb:<room_code>:<budget_code>
+CB_WIZ_AREA = "wiza"        # wiza:<room_code>:<budget_code>:<area_code>
+CB_WIZ_RESULTS = "wizres"   # wizres:<room_code>:<budget_code>:<area_code>:<page>
+CB_WIZ_FLAT = "wizfl"       # wizfl:<id>:<room_code>:<budget_code>:<area_code>:<page>
+
+WIZ_ROOM_OPTIONS = [
+    ("any", "Будь-який тип", None),
+    ("studio", "Студія", "Студія"),
+    ("1k", "1-кімнатна", "1-кімнатна"),
+    ("2k", "2-кімнатна", "2-кімнатна"),
+    ("3k", "3-кімнатна", "3-кімнатна"),
+    ("office", "Офіс", "Офіс"),
+]
+
+WIZ_BUDGET_OPTIONS = [
+    ("any", "Будь-який бюджет", None, None),
+    ("b1", "до $50 000", None, 50_000),
+    ("b2", "$50 000 – $80 000", 50_000, 80_000),
+    ("b3", "$80 000 – $120 000", 80_000, 120_000),
+    ("b4", "понад $120 000", 120_000, None),
+]
+
+WIZ_AREA_OPTIONS = [
+    ("any", "Будь-яка площа", None, None),
+    ("a1", "до 35 м²", None, 35),
+    ("a2", "35–55 м²", 35, 55),
+    ("a3", "55–80 м²", 55, 80),
+    ("a4", "понад 80 м²", 80, None),
+]
+
+WIZ_ROOM_LABELS = {code: label for code, label, _ in WIZ_ROOM_OPTIONS}
+WIZ_BUDGET_LABELS = {code: label for code, label, _, _ in WIZ_BUDGET_OPTIONS}
+WIZ_AREA_LABELS = {code: label for code, label, _, _ in WIZ_AREA_OPTIONS}
+
+
+def parse_price(price_str: str):
+    digits = re.sub(r"[^\d]", "", price_str or "")
+    return int(digits) if digits else None
+
+
+def parse_area(area_str: str):
+    m = re.search(r"([\d]+(?:[.,]\d+)?)", area_str or "")
+    return float(m.group(1).replace(",", ".")) if m else None
+
+
+def wiz_filter_flats(room_code: str, budget_code: str, area_code: str) -> list[dict]:
+    room_value = dict((c, v) for c, _, v in WIZ_ROOM_OPTIONS)[room_code]
+    _, _, budget_min, budget_max = next(o for o in WIZ_BUDGET_OPTIONS if o[0] == budget_code)
+    _, _, area_min, area_max = next(o for o in WIZ_AREA_OPTIONS if o[0] == area_code)
+
+    result = []
+    for c in db.get_complexes():
+        for flat in db.get_flats_by_complex(c["complex_slug"]):
+            if room_value is not None:
+                flat_type = (flat.get("flat_type") or flat.get("rooms") or "").strip()
+                if flat_type != room_value:
+                    continue
+
+            if budget_min is not None or budget_max is not None:
+                price = parse_price(flat.get("price", ""))
+                if price is None:
+                    continue
+                if budget_min is not None and price < budget_min:
+                    continue
+                if budget_max is not None and price >= budget_max:
+                    continue
+
+            if area_min is not None or area_max is not None:
+                area = parse_area(flat.get("area", ""))
+                if area is None:
+                    continue
+                if area_min is not None and area < area_min:
+                    continue
+                if area_max is not None and area >= area_max:
+                    continue
+
+            result.append(flat)
+
+    result.sort(key=lambda f: parse_price(f.get("price", "")) or 0)
+    return result
+
+
+def wiz_room_keyboard() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text=label, callback_data=f"{CB_WIZ_ROOM}:{code}")] for code, label, _ in WIZ_ROOM_OPTIONS]
+    rows.append([InlineKeyboardButton(text="‹ На головну", callback_data=CB_BACK_CATEGORIES)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def wiz_budget_keyboard(room_code: str) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=label, callback_data=f"{CB_WIZ_BUDGET}:{room_code}:{code}")]
+        for code, label, _, _ in WIZ_BUDGET_OPTIONS
+    ]
+    rows.append([InlineKeyboardButton(text="‹ Назад", callback_data=CB_WIZ_START)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def wiz_area_keyboard(room_code: str, budget_code: str) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=label, callback_data=f"{CB_WIZ_AREA}:{room_code}:{budget_code}:{code}")]
+        for code, label, _, _ in WIZ_AREA_OPTIONS
+    ]
+    rows.append([InlineKeyboardButton(text="‹ Назад", callback_data=f"{CB_WIZ_ROOM}:{room_code}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def wiz_flat_preview_keyboard(flat_id: int, room_code: str, budget_code: str, area_code: str, page: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="Детальніше",
+            callback_data=f"{CB_WIZ_FLAT}:{flat_id}:{room_code}:{budget_code}:{area_code}:{page}",
+        )]
+    ])
+
+
+def wiz_results_nav_keyboard(room_code: str, budget_code: str, area_code: str, page: int, total: int) -> InlineKeyboardMarkup:
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(
+            text="« Назад",
+            callback_data=f"{CB_WIZ_RESULTS}:{room_code}:{budget_code}:{area_code}:{page - 1}",
+        ))
+    if (page + 1) * FLATS_PER_PAGE < total:
+        nav.append(InlineKeyboardButton(
+            text="Далі »",
+            callback_data=f"{CB_WIZ_RESULTS}:{room_code}:{budget_code}:{area_code}:{page + 1}",
+        ))
+
+    rows = []
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text="🔄 Новий пошук", callback_data=CB_WIZ_START)])
+    rows.append([InlineKeyboardButton(text="‹ На головну", callback_data=CB_BACK_CATEGORIES)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def wiz_flat_detail_keyboard(room_code: str, budget_code: str, area_code: str, page: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Написати в Telegram", url=f"https://t.me/{CONTACT_TELEGRAM.lstrip('@')}"),
+                InlineKeyboardButton(text="📞 Подзвонити", callback_data=CB_SHOW_PHONE),
+            ],
+            [InlineKeyboardButton(
+                text="‹ До результатів підбору",
+                callback_data=f"{CB_WIZ_RESULTS}:{room_code}:{budget_code}:{area_code}:{page}",
+            )],
+        ]
+    )
 
 
 def flat_category(flat: dict) -> str:
@@ -75,6 +229,7 @@ def categories_keyboard() -> InlineKeyboardMarkup:
                 text=f"{CAT_TITLES[cat]} ({counts[cat]})",
                 callback_data=f"{CB_CATEGORY}:{cat}",
             )])
+    rows.append([InlineKeyboardButton(text="🔍 Підібрати варіант за параметрами", callback_data=CB_WIZ_START)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -289,6 +444,141 @@ async def show_flat_detail(call: CallbackQuery):
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
 
+    await call.answer()
+
+
+@router.callback_query(F.data == CB_WIZ_START)
+async def wiz_start(call: CallbackQuery):
+    await call.message.edit_text(
+        "🔍 <b>Підбір варіанту</b>\n\nДопоможу швидко знайти підходящі квартири чи офіси.\n\n"
+        "Крок 1 з 3. Який тип приміщення вас цікавить?",
+        reply_markup=wiz_room_keyboard(),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith(f"{CB_WIZ_ROOM}:"))
+async def wiz_choose_room(call: CallbackQuery):
+    _, room_code = call.data.split(":", 1)
+    await call.message.edit_text(
+        f"🔍 <b>Підбір варіанту</b>\nТип: {WIZ_ROOM_LABELS.get(room_code)}\n\n"
+        "Крок 2 з 3. Який бюджет вам підходить?",
+        reply_markup=wiz_budget_keyboard(room_code),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith(f"{CB_WIZ_BUDGET}:"))
+async def wiz_choose_budget(call: CallbackQuery):
+    _, room_code, budget_code = call.data.split(":")
+    await call.message.edit_text(
+        f"🔍 <b>Підбір варіанту</b>\n"
+        f"Тип: {WIZ_ROOM_LABELS.get(room_code)} · Бюджет: {WIZ_BUDGET_LABELS.get(budget_code)}\n\n"
+        "Крок 3 з 3. Яка площа вам підходить?",
+        reply_markup=wiz_area_keyboard(room_code, budget_code),
+    )
+    await call.answer()
+
+
+async def send_wiz_results(message: Message, room_code: str, budget_code: str, area_code: str, page: int, edit: bool = False):
+    flats = wiz_filter_flats(room_code, budget_code, area_code)
+
+    summary = (
+        f"🔍 <b>Результати підбору</b>\n"
+        f"Тип: {WIZ_ROOM_LABELS.get(room_code)} · "
+        f"Бюджет: {WIZ_BUDGET_LABELS.get(budget_code)} · "
+        f"Площа: {WIZ_AREA_LABELS.get(area_code)}\n"
+    )
+
+    if not flats:
+        text = summary + "\nНа жаль, за такими параметрами зараз нічого не знайдено 😔\nСпробуйте змінити критерії пошуку."
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Новий пошук", callback_data=CB_WIZ_START)],
+            [InlineKeyboardButton(text="‹ На головну", callback_data=CB_BACK_CATEGORIES)],
+        ])
+        if edit:
+            try:
+                await message.edit_text(text, reply_markup=keyboard)
+                return
+            except Exception:
+                pass
+        await message.answer(text, reply_markup=keyboard)
+        return
+
+    start = page * FLATS_PER_PAGE
+    chunk = flats[start:start + FLATS_PER_PAGE]
+
+    header = summary + f"\nЗнайдено варіантів: {len(flats)}\n\nОберіть один з варіантів нижче 👇"
+    if edit:
+        try:
+            await message.edit_text(header)
+        except Exception:
+            await message.answer(header)
+    else:
+        await message.answer(header)
+
+    for flat in chunk:
+        caption = flat_preview_caption(flat)
+        keyboard = wiz_flat_preview_keyboard(flat["id"], room_code, budget_code, area_code, page)
+        if flat.get("image_url"):
+            try:
+                await message.answer_photo(photo=flat["image_url"], caption=caption, reply_markup=keyboard)
+                continue
+            except Exception as e:
+                log.warning("Не вдалось надіслати фото квартири %s: %s", flat["id"], e)
+        await message.answer(caption, reply_markup=keyboard)
+
+    await message.answer(
+        "Гортайте список або почніть новий пошук:",
+        reply_markup=wiz_results_nav_keyboard(room_code, budget_code, area_code, page, len(flats)),
+    )
+
+
+@router.callback_query(F.data.startswith(f"{CB_WIZ_AREA}:"))
+async def wiz_choose_area(call: CallbackQuery):
+    _, room_code, budget_code, area_code = call.data.split(":")
+    await call.bot.send_chat_action(call.message.chat.id, "upload_photo")
+    await send_wiz_results(call.message, room_code, budget_code, area_code, 0, edit=True)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith(f"{CB_WIZ_RESULTS}:"))
+async def wiz_results_page(call: CallbackQuery):
+    _, room_code, budget_code, area_code, page = call.data.split(":")
+    await call.bot.send_chat_action(call.message.chat.id, "upload_photo")
+    await send_wiz_results(call.message, room_code, budget_code, area_code, int(page), edit=False)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith(f"{CB_WIZ_FLAT}:"))
+async def wiz_show_flat_detail(call: CallbackQuery):
+    _, flat_id, room_code, budget_code, area_code, page = call.data.split(":")
+    flat = db.get_flat(int(flat_id))
+    if not flat:
+        await call.answer("Цей варіант вже знято з продажу", show_alert=True)
+        return
+
+    caption = flat_caption(flat)
+    keyboard = wiz_flat_detail_keyboard(room_code, budget_code, area_code, int(page))
+
+    photos = []
+    if flat.get("image_url"):
+        photos.append(InputMediaPhoto(media=flat["image_url"]))
+    if flat.get("plan_image_url"):
+        photos.append(InputMediaPhoto(media=flat["plan_image_url"]))
+
+    await call.bot.send_chat_action(call.message.chat.id, "upload_photo")
+    if photos:
+        try:
+            await call.message.answer_media_group(media=photos)
+        except Exception as e:
+            log.warning("Не вдалось надіслати медіа для варіанту %s: %s", flat_id, e)
+
+    await call.message.answer(
+        caption,
+        reply_markup=keyboard,
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
     await call.answer()
 
 
