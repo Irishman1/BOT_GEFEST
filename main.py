@@ -31,10 +31,6 @@ async def main():
 
     db.init_db()
 
-    # Якщо база порожня — наповнюємо одразу при старті
-    if db.count_flats() == 0:
-        await update_catalog()
-
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         update_catalog,
@@ -47,6 +43,12 @@ async def main():
 
     bot = create_bot(BOT_TOKEN)
     dp = create_dispatcher()
+
+    # Запускаємо парсинг у фоні — бот одразу доступний,
+    # а якщо база порожня, відповідає "Дані ще завантажуються"
+    if db.count_flats() == 0:
+        asyncio.create_task(update_catalog())
+        log.info("База порожня — запущено фоновий парсинг")
 
     log.info("Бот запущено")
     await dp.start_polling(bot)
