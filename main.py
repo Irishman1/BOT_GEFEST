@@ -12,10 +12,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 log = logging.getLogger("main")
 
 
-def update_catalog():
+async def update_catalog():
     log.info("Запуск оновлення каталогу квартир...")
     try:
-        flats = scraper.crawl_all(with_details=True)
+        flats = await asyncio.to_thread(scraper.crawl_all, True)
         if flats:
             db.replace_all_flats(flats)
             log.info("Каталог оновлено, квартир у базі: %s", db.count_flats())
@@ -31,18 +31,19 @@ async def main():
 
     db.init_db()
 
-    # Если база пуста — наповнюємо її одразу, щоб бот міг одразу відповідати
+    # Якщо база порожня — наповнюємо одразу при старті
     if db.count_flats() == 0:
-        await asyncio.to_thread(update_catalog)
+        await update_catalog()
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
-        lambda: asyncio.create_task(asyncio.to_thread(update_catalog)),
+        update_catalog,
         "interval",
         hours=PARSE_INTERVAL_HOURS,
         id="update_catalog",
     )
     scheduler.start()
+    log.info("Планувальник запущено, оновлення кожні %s год.", PARSE_INTERVAL_HOURS)
 
     bot = create_bot(BOT_TOKEN)
     dp = create_dispatcher()
