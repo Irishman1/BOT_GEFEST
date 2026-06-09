@@ -2,11 +2,12 @@ import asyncio
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 import database as db
 import scraper
 from bot import create_bot, create_dispatcher
-from config import BOT_TOKEN, PARSE_INTERVAL_HOURS
+from config import BOT_TOKEN
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("main")
@@ -31,15 +32,14 @@ async def main():
 
     db.init_db()
 
-    scheduler = AsyncIOScheduler()
+    scheduler = AsyncIOScheduler(timezone="Europe/Kyiv")
     scheduler.add_job(
         update_catalog,
-        "interval",
-        hours=PARSE_INTERVAL_HOURS,
+        CronTrigger(hour="6,12,18", minute=0, timezone="Europe/Kyiv"),
         id="update_catalog",
     )
     scheduler.start()
-    log.info("Планувальник запущено, оновлення кожні %s год.", PARSE_INTERVAL_HOURS)
+    log.info("Планувальник запущено, оновлення о 6:00, 12:00, 18:00 (Kyiv)")
 
     bot = create_bot(BOT_TOKEN)
     dp = create_dispatcher()
