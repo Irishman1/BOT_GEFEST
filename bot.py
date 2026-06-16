@@ -35,6 +35,8 @@ CB_FLAT = "fl"          # fl:<id>:<slug>:<page>:<cat>
 CB_BACK_CATEGORIES = "back_cat"
 CB_BACK_COMPLEXES = "back_cx"  # back_cx:<cat>
 CB_SHOW_PHONE = "phone"
+CB_CX_ROOM = "cxr"    # cxr:<slug>:<cat>          — вибір типу кімнат
+CB_CX_ROOM_SEL = "cxrs"  # cxrs:<slug>:<cat>:<room>  — обраний тип
 
 # --- Підбір варіанту за параметрами (майстер з питань) ---
 CB_WIZ_START = "wiz_start"
@@ -246,34 +248,58 @@ def complexes_keyboard(category: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def flat_preview_keyboard(flat_id: int, slug: str, page: int, category: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Детальніше", callback_data=f"{CB_FLAT}:{flat_id}:{slug}:{page}:{category}")]
-    ])
-
-
-def flats_nav_keyboard(slug: str, page: int, category: str, total: int) -> InlineKeyboardMarkup:
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text="« Назад", callback_data=f"{CB_LIST}:{slug}:{page - 1}:{category}"))
-    if (page + 1) * FLATS_PER_PAGE < total:
-        nav.append(InlineKeyboardButton(text="Далі »", callback_data=f"{CB_LIST}:{slug}:{page + 1}:{category}"))
-
+def complex_rooms_keyboard(slug: str, category: str) -> InlineKeyboardMarkup:
+    flats = flats_in_category(slug, category)
+    seen: dict[str, str] = {}
+    for f in flats:
+        t = (f.get("flat_type") or f.get("rooms") or "").strip()
+        if t and t not in seen:
+            seen[t] = t
     rows = []
-    if nav:
-        rows.append(nav)
+    if len(seen) > 1:
+        rows.append([InlineKeyboardButton(
+            text=f"Всі варіанти ({len(flats)})",
+            callback_data=f"{CB_CX_ROOM_SEL}:{slug}:{category}:any",
+        )])
+    for t in seen:
+        count = sum(1 for f in flats if (f.get("flat_type") or f.get("rooms") or "").strip() == t)
+        rows.append([InlineKeyboardButton(
+            text=f"{t} ({count})",
+            callback_data=f"{CB_CX_ROOM_SEL}:{slug}:{category}:{t}",
+        )])
     rows.append([InlineKeyboardButton(text="‹ До списку об'єктів", callback_data=f"{CB_BACK_COMPLEXES}:{category}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def flat_detail_keyboard(slug: str, page: int, category: str) -> InlineKeyboardMarkup:
+def flat_preview_keyboard(flat_id: int, slug: str, page: int, category: str, room: str = "any") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Детальніше", callback_data=f"{CB_FLAT}:{flat_id}:{slug}:{page}:{category}:{room}")]
+    ])
+
+
+def flats_nav_keyboard(slug: str, page: int, category: str, total: int, room: str = "any") -> InlineKeyboardMarkup:
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="« Назад", callback_data=f"{CB_LIST}:{slug}:{page - 1}:{category}:{room}"))
+    if (page + 1) * FLATS_PER_PAGE < total:
+        nav.append(InlineKeyboardButton(text="Далі »", callback_data=f"{CB_LIST}:{slug}:{page + 1}:{category}:{room}"))
+
+    rows = []
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text="‹ Змінити тип", callback_data=f"{CB_CX_ROOM}:{slug}:{category}")])
+    rows.append([InlineKeyboardButton(text="‹ До списку об'єктів", callback_data=f"{CB_BACK_COMPLEXES}:{category}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def flat_detail_keyboard(slug: str, page: int, category: str, room: str = "any") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="Написати в Telegram", url=f"https://t.me/{CONTACT_TELEGRAM.lstrip('@')}"),
                 InlineKeyboardButton(text="📞 Подзвонити", callback_data=CB_SHOW_PHONE),
             ],
-            [InlineKeyboardButton(text="‹ До списку квартир", callback_data=f"{CB_LIST}:{slug}:{page}:{category}")],
+            [InlineKeyboardButton(text="‹ До списку квартир", callback_data=f"{CB_LIST}:{slug}:{page}:{category}:{room}")],
         ]
     )
 
@@ -362,17 +388,23 @@ async def back_to_complexes(call: CallbackQuery):
     await call.answer()
 
 
-async def send_flats_page(message: Message, slug: str, page: int, category: str, edit: bool = False):
-    flats = flats_in_category(slug, category)
+async def send_flats_page(message: Message, slug: str, page: int, category: str, room: str = "any", edit: bool = False):
+    all_flats = flats_in_category(slug, category)
+    flats = all_flats if room == "any" else [
+        f for f in all_flats
+        if (f.get("flat_type") or f.get("rooms") or "").strip() == room
+    ]
+
     if not flats:
-        await message.answer("На жаль, у цьому об'єкті зараз немає вільних приміщень цього типу")
+        await message.answer("На жаль, за цим типом зараз немає вільних приміщень")
         return
 
     name = flats[0]["complex_name"]
+    room_label = "" if room == "any" else f" · {room}"
     start = page * FLATS_PER_PAGE
     chunk = flats[start:start + FLATS_PER_PAGE]
 
-    header = f"<b>{name}</b>\nЗнайдено приміщень: {len(flats)}\n\nОберіть один з варіантів нижче 👇"
+    header = f"<b>{name}{room_label}</b>\nЗнайдено приміщень: {len(flats)}\n\nОберіть один з варіантів нижче 👇"
     if edit:
         try:
             await message.edit_text(header)
@@ -383,7 +415,7 @@ async def send_flats_page(message: Message, slug: str, page: int, category: str,
 
     for flat in chunk:
         caption = flat_preview_caption(flat)
-        keyboard = flat_preview_keyboard(flat["id"], slug, page, category)
+        keyboard = flat_preview_keyboard(flat["id"], slug, page, category, room)
         if flat.get("image_url"):
             try:
                 await message.answer_photo(photo=flat["image_url"], caption=caption, reply_markup=keyboard)
@@ -394,36 +426,68 @@ async def send_flats_page(message: Message, slug: str, page: int, category: str,
 
     await message.answer(
         "Гортайте список або поверніться назад:",
-        reply_markup=flats_nav_keyboard(slug, page, category, len(flats)),
+        reply_markup=flats_nav_keyboard(slug, page, category, len(flats), room),
     )
 
 
 @router.callback_query(F.data.startswith(f"{CB_COMPLEX}:"))
 async def show_complex(call: CallbackQuery):
     _, slug, category = call.data.split(":")
+    flats = flats_in_category(slug, category)
+    if not flats:
+        await call.answer("На жаль, у цьому об'єкті немає вільних приміщень", show_alert=True)
+        return
+    name = flats[0]["complex_name"]
+    await call.message.edit_text(
+        f"<b>{name}</b>\nЗнайдено приміщень: {len(flats)}\n\nОберіть тип приміщення:",
+        reply_markup=complex_rooms_keyboard(slug, category),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith(f"{CB_CX_ROOM}:"))
+async def show_complex_room_filter(call: CallbackQuery):
+    _, slug, category = call.data.split(":")
+    flats = flats_in_category(slug, category)
+    name = flats[0]["complex_name"] if flats else ""
+    await call.message.edit_text(
+        f"<b>{name}</b>\n\nОберіть тип приміщення:",
+        reply_markup=complex_rooms_keyboard(slug, category),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith(f"{CB_CX_ROOM_SEL}:"))
+async def show_complex_room_selected(call: CallbackQuery):
+    parts = call.data.split(":")
+    _, slug, category, room = parts[0], parts[1], parts[2], parts[3]
     await call.bot.send_chat_action(call.message.chat.id, "upload_photo")
-    await send_flats_page(call.message, slug, 0, category, edit=True)
+    await send_flats_page(call.message, slug, 0, category, room, edit=True)
     await call.answer()
 
 
 @router.callback_query(F.data.startswith(f"{CB_LIST}:"))
 async def show_flats_page(call: CallbackQuery):
-    _, slug, page, category = call.data.split(":")
+    parts = call.data.split(":")
+    slug, page, category = parts[1], parts[2], parts[3]
+    room = parts[4] if len(parts) > 4 else "any"
     await call.bot.send_chat_action(call.message.chat.id, "upload_photo")
-    await send_flats_page(call.message, slug, int(page), category, edit=False)
+    await send_flats_page(call.message, slug, int(page), category, room, edit=False)
     await call.answer()
 
 
 @router.callback_query(F.data.startswith(f"{CB_FLAT}:"))
 async def show_flat_detail(call: CallbackQuery):
-    _, flat_id, slug, page, category = call.data.split(":")
+    parts = call.data.split(":")
+    flat_id, slug, page, category = parts[1], parts[2], parts[3], parts[4]
+    room = parts[5] if len(parts) > 5 else "any"
     flat = db.get_flat(int(flat_id))
     if not flat:
         await call.answer("Цю квартиру вже знято з продажу", show_alert=True)
         return
 
     caption = flat_caption(flat)
-    keyboard = flat_detail_keyboard(slug, int(page), category)
+    keyboard = flat_detail_keyboard(slug, int(page), category, room)
 
     photos = []
     if flat.get("image_url"):
